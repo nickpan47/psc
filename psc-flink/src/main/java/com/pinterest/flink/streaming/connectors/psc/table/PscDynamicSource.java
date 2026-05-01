@@ -450,13 +450,36 @@ public class PscDynamicSource
                         execEnv.fromSource(
                                 pscSource, watermarkStrategy, "PscSource-" + tableIdentifier);
                 
-                // Source parallelism is determined by partition count (Flink's default for Kafka-like sources)
-                // We do NOT set it explicitly even if scan.parallelism is configured, because:
-                // - A Kafka source can only have as many active subtasks as there are partitions
-                // - Setting higher parallelism would create idle subtasks
-                // - Instead, we use rescale() to redistribute data to the intended downstream parallelism
-                
                 DataStream<RowData> resultStream = sourceStream;
+                
+                // Only cap source parallelism at partition count when rescale is enabled.
+                // When rescale is enabled, we want to avoid idle subtasks at the source,
+                // then use rescale() to redistribute data to the intended downstream parallelism.
+                // When rescale is disabled, source parallelism is controlled by job default or scan.parallelism.
+                if (enableRescale) {
+                    int partitionCount = PscTableCommonUtils.getTopicPartitionCount(topicUris, properties);
+                    if (partitionCount > 0) {
+                        // Cap source parallelism at partition count to avoid idle subtasks
+                        int sourceParallelism = Math.min(partitionCount, execEnv.getParallelism());
+                        sourceStream.setParallelism(sourceParallelism);
+                        LOG.info("Rescale enabled: set source parallelism to {} (partition count: {}, job parallelism: {})",
+                                sourceParallelism, partitionCount, execEnv.getParallelism());
+                    } else {
+                        LOG.warn("Rescale enabled but could not determine partition count, source will use job default parallelism: {}",
+                                execEnv.getParallelism());
+                    }
+                } else {
+                    // When rescale is disabled, source parallelism follows normal Flink behavior:
+                    // - Uses scan.parallelism if set
+                    // - Otherwise uses job default parallelism
+                    // Note: This may result in idle subtasks if parallelism > partition count
+                    if (scanParallelism != null && scanParallelism > 0) {
+                        sourceStream.setParallelism(scanParallelism);
+                        LOG.info("Rescale disabled: set source parallelism to scan.parallelism = {}", scanParallelism);
+                    } else {
+                        LOG.info("Rescale disabled: source will use job default parallelism = {}", execEnv.getParallelism());
+                    }
+                }
                 
                 // Determine the intended downstream parallelism for rate limiting
                 // This is scan.parallelism if set, otherwise global default parallelism

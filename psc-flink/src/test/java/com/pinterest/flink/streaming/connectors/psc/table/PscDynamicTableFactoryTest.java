@@ -1731,6 +1731,439 @@ public class PscDynamicTableFactoryTest {
     }
 
     @Test
+    public void testSourceParallelismCappedAtPartitionCountWithRescale() {
+        // Scenario: partition count = 360, job parallelism = 720, rescale enabled
+        // Expected: source parallelism = 360, rescale applied to fan out to 720
+        
+        try {
+            // Mock partition count = 360
+            PscTableCommonUtils.setProviderForTest((topicUris, props) -> 360);
+            
+            // Create source with rescale enabled (no scan.parallelism set)
+            final Map<String, String> modifiedOptions =
+                    getModifiedOptions(
+                            getBasicSourceOptions(),
+                            options -> {
+                                addRescaleConfig(options, true);
+                            });
+            
+            final DynamicTableSource actualSource = createTableSource(SCHEMA, modifiedOptions);
+            assertThat(actualSource).isInstanceOf(PscDynamicSource.class);
+            
+            final PscDynamicSource pscSource = (PscDynamicSource) actualSource;
+            
+            // Verify rescale is enabled
+            assertThat(pscSource.enableRescale).isTrue();
+            
+            // Get transformation with job parallelism = 720
+            final Transformation<RowData> transformation = produceTransformationFromSource(pscSource, 720);
+            
+            // The transformation should be a PartitionTransformation (rescale operator)
+            // because downstream parallelism (720) > source parallelism (360)
+            assertThat(transformation).isNotNull();
+            assertThat(transformation).isInstanceOf(PartitionTransformation.class);
+            
+            // Verify the source transformation has parallelism capped at partition count (360)
+            Transformation<?> sourceTransformation = transformation.getInputs().get(0);
+            assertThat(sourceTransformation).isInstanceOf(SourceTransformation.class);
+            assertThat(sourceTransformation.getParallelism()).isEqualTo(360);
+        } finally {
+            PscTableCommonUtils.resetProvider();
+        }
+    }
+
+    @Test
+    public void testSourceParallelismCappedAtPartitionCountWithDefaultParallelismMinusOne() {
+        // Scenario: partition count = 360, job parallelism = 720, table.exec.resource.default-parallelism = -1
+        // This tests the case where default-parallelism is not explicitly set (returns -1)
+        // Expected: source parallelism = 360 (capped at partition count)
+        // Note: rescale decision at factory time may differ, but source parallelism should still be capped
+        
+        try {
+            // Mock partition count = 360
+            PscTableCommonUtils.setProviderForTest((topicUris, props) -> 360);
+            
+            // Create source with rescale enabled
+            final Map<String, String> modifiedOptions =
+                    getModifiedOptions(
+                            getBasicSourceOptions(),
+                            options -> {
+                                addRescaleConfig(options, true);
+                            });
+            
+            final DynamicTableSource actualSource = createTableSource(SCHEMA, modifiedOptions);
+            assertThat(actualSource).isInstanceOf(PscDynamicSource.class);
+            
+            final PscDynamicSource pscSource = (PscDynamicSource) actualSource;
+            
+            // Get transformation with job parallelism = 720
+            // Even if rescale decision was false at factory time (due to -1 default parallelism),
+            // the source parallelism should still be capped at partition count
+            final Transformation<RowData> transformation = produceTransformationFromSource(pscSource, 720);
+            
+            // Find the source transformation in the chain
+            Transformation<?> currentTransformation = transformation;
+            while (currentTransformation != null && 
+                   !(currentTransformation instanceof SourceTransformation)) {
+                if (currentTransformation.getInputs().isEmpty()) {
+                    break;
+                }
+                currentTransformation = currentTransformation.getInputs().get(0);
+            }
+            
+            // Verify source parallelism is capped at partition count (360), not job parallelism (720)
+            assertThat(currentTransformation).isInstanceOf(SourceTransformation.class);
+            assertThat(currentTransformation.getParallelism()).isEqualTo(360);
+        } finally {
+            PscTableCommonUtils.resetProvider();
+        }
+    }
+
+    @Test
+    public void testSourceParallelismWithExplicitDefaultParallelism720() {
+        // Scenario: partition count = 360, table.exec.resource.default-parallelism = 720, rescale enabled
+        // Expected: source parallelism = 360, rescale applied
+        
+        try {
+            // Mock partition count = 360
+            PscTableCommonUtils.setProviderForTest((topicUris, props) -> 360);
+            
+            // Create source with rescale enabled
+            final Map<String, String> modifiedOptions =
+                    getModifiedOptions(
+                            getBasicSourceOptions(),
+                            options -> {
+                                addRescaleConfig(options, true);
+                            });
+            
+            final DynamicTableSource actualSource = createTableSource(SCHEMA, modifiedOptions);
+            assertThat(actualSource).isInstanceOf(PscDynamicSource.class);
+            
+            final PscDynamicSource pscSource = (PscDynamicSource) actualSource;
+            
+            // Verify rescale is enabled (720 > 360)
+            assertThat(pscSource.enableRescale).isTrue();
+            
+            // Get transformation with job parallelism = 720
+            final Transformation<RowData> transformation = produceTransformationFromSource(pscSource, 720);
+            
+            // The transformation should be a PartitionTransformation (rescale operator)
+            assertThat(transformation).isNotNull();
+            assertThat(transformation).isInstanceOf(PartitionTransformation.class);
+            
+            // Verify the source transformation has parallelism = 360 (capped at partition count)
+            Transformation<?> sourceTransformation = transformation.getInputs().get(0);
+            assertThat(sourceTransformation).isInstanceOf(SourceTransformation.class);
+            assertThat(sourceTransformation.getParallelism()).isEqualTo(360);
+        } finally {
+            PscTableCommonUtils.resetProvider();
+        }
+    }
+
+    @Test
+    public void testSourceParallelismWithScanParallelism360() {
+        // Scenario: partition count = 360, scan.parallelism = 360, job parallelism = 720, rescale enabled
+        // Expected: source parallelism = 360, rescale applied (720 > 360)
+        
+        try {
+            // Mock partition count = 360
+            PscTableCommonUtils.setProviderForTest((topicUris, props) -> 360);
+            
+            // Create source with scan.parallelism = 360, rescale enabled
+            final Map<String, String> modifiedOptions =
+                    getModifiedOptions(
+                            getBasicSourceOptions(),
+                            options -> {
+                                addRescaleConfig(options, true);
+                                addScanParallelismConfig(options, 360);
+                            });
+            
+            final DynamicTableSource actualSource = createTableSource(SCHEMA, modifiedOptions);
+            assertThat(actualSource).isInstanceOf(PscDynamicSource.class);
+            
+            final PscDynamicSource pscSource = (PscDynamicSource) actualSource;
+            
+            // Verify configuration
+            assertThat(pscSource.scanParallelism).isEqualTo(360);
+            assertThat(pscSource.enableRescale).isTrue();
+            
+            // Get transformation with job parallelism = 720
+            final Transformation<RowData> transformation = produceTransformationFromSource(pscSource, 720);
+            
+            // The transformation should be a PartitionTransformation (rescale operator)
+            // because downstream parallelism (720) > source parallelism (360)
+            assertThat(transformation).isNotNull();
+            assertThat(transformation).isInstanceOf(PartitionTransformation.class);
+            
+            // Verify the source transformation has parallelism = 360
+            Transformation<?> sourceTransformation = transformation.getInputs().get(0);
+            assertThat(sourceTransformation).isInstanceOf(SourceTransformation.class);
+            assertThat(sourceTransformation.getParallelism()).isEqualTo(360);
+        } finally {
+            PscTableCommonUtils.resetProvider();
+        }
+    }
+
+    @Test
+    public void testSourceParallelismWithScanParallelism720() {
+        // Scenario: partition count = 360, scan.parallelism = 720, job parallelism = 720, rescale enabled
+        // Expected: source parallelism = 360 (capped at partition count, not scan.parallelism)
+        // Rescale IS needed because source (360) != intended scan.parallelism (720)
+        
+        try {
+            // Mock partition count = 360
+            PscTableCommonUtils.setProviderForTest((topicUris, props) -> 360);
+            
+            // Create source with scan.parallelism = 720, rescale enabled
+            final Map<String, String> modifiedOptions =
+                    getModifiedOptions(
+                            getBasicSourceOptions(),
+                            options -> {
+                                addRescaleConfig(options, true);
+                                addScanParallelismConfig(options, 720);
+                            });
+            
+            final DynamicTableSource actualSource = createTableSource(SCHEMA, modifiedOptions);
+            assertThat(actualSource).isInstanceOf(PscDynamicSource.class);
+            
+            final PscDynamicSource pscSource = (PscDynamicSource) actualSource;
+            
+            // Verify configuration
+            assertThat(pscSource.scanParallelism).isEqualTo(720);
+            assertThat(pscSource.enableRescale).isTrue();
+            
+            // Get transformation with job parallelism = 720
+            final Transformation<RowData> transformation = produceTransformationFromSource(pscSource, 720);
+            
+            // Rescale should be applied because source parallelism (360) != intended parallelism (720)
+            // The transformation should be a PartitionTransformation (rescale operator)
+            assertThat(transformation).isNotNull();
+            assertThat(transformation).isInstanceOf(PartitionTransformation.class);
+            
+            // Verify the source transformation has parallelism capped at partition count (360)
+            Transformation<?> sourceTransformation = transformation.getInputs().get(0);
+            assertThat(sourceTransformation).isInstanceOf(SourceTransformation.class);
+            assertThat(sourceTransformation.getParallelism()).isEqualTo(360);
+        } finally {
+            PscTableCommonUtils.resetProvider();
+        }
+    }
+
+    @Test
+    public void testSourceParallelismWithScanParallelism1024() {
+        // Scenario: partition count = 360, scan.parallelism = 1024, job parallelism = 720, rescale enabled
+        // Expected: source parallelism = 360 (capped at partition count)
+        // Rescale IS needed because source (360) != intended scan.parallelism (1024)
+        
+        try {
+            // Mock partition count = 360
+            PscTableCommonUtils.setProviderForTest((topicUris, props) -> 360);
+            
+            // Create source with scan.parallelism = 1024, rescale enabled
+            final Map<String, String> modifiedOptions =
+                    getModifiedOptions(
+                            getBasicSourceOptions(),
+                            options -> {
+                                addRescaleConfig(options, true);
+                                addScanParallelismConfig(options, 1024);
+                            });
+            
+            final DynamicTableSource actualSource = createTableSource(SCHEMA, modifiedOptions);
+            assertThat(actualSource).isInstanceOf(PscDynamicSource.class);
+            
+            final PscDynamicSource pscSource = (PscDynamicSource) actualSource;
+            
+            // Verify configuration
+            assertThat(pscSource.scanParallelism).isEqualTo(1024);
+            assertThat(pscSource.enableRescale).isTrue();
+            
+            // Get transformation with job parallelism = 720
+            final Transformation<RowData> transformation = produceTransformationFromSource(pscSource, 720);
+            
+            // Rescale should be applied because source parallelism (360) != intended parallelism (1024)
+            // The transformation should be a PartitionTransformation (rescale operator)
+            assertThat(transformation).isNotNull();
+            assertThat(transformation).isInstanceOf(PartitionTransformation.class);
+            
+            // Verify the source transformation has parallelism capped at partition count (360)
+            Transformation<?> sourceTransformation = transformation.getInputs().get(0);
+            assertThat(sourceTransformation).isInstanceOf(SourceTransformation.class);
+            assertThat(sourceTransformation.getParallelism()).isEqualTo(360);
+        } finally {
+            PscTableCommonUtils.resetProvider();
+        }
+    }
+
+    @Test
+    public void testSourceParallelismNotBoundedWhenRescaleDisabled_JobDefault() {
+        // Scenario: partition count = 360, rescale DISABLED, job parallelism = 720
+        // Expected: source parallelism = 720 (job default, NOT bounded by partition count)
+        // No rescale operator applied
+        
+        try {
+            // Mock partition count = 360
+            PscTableCommonUtils.setProviderForTest((topicUris, props) -> 360);
+            
+            // Create source with rescale DISABLED (default)
+            final Map<String, String> modifiedOptions =
+                    getModifiedOptions(
+                            getBasicSourceOptions(),
+                            options -> {
+                                addRescaleConfig(options, false);
+                            });
+            
+            final DynamicTableSource actualSource = createTableSource(SCHEMA, modifiedOptions);
+            assertThat(actualSource).isInstanceOf(PscDynamicSource.class);
+            
+            final PscDynamicSource pscSource = (PscDynamicSource) actualSource;
+            
+            // Verify rescale is disabled
+            assertThat(pscSource.enableRescale).isFalse();
+            
+            // Get transformation with job parallelism = 720
+            final Transformation<RowData> transformation = produceTransformationFromSource(pscSource, 720);
+            
+            // No rescale should be applied - transformation should be SourceTransformation directly
+            assertThat(transformation).isNotNull();
+            assertThat(transformation).isInstanceOf(SourceTransformation.class);
+            assertThat(transformation).isNotInstanceOf(PartitionTransformation.class);
+            
+            // Source parallelism should be job default (720), NOT bounded by partition count (360)
+            assertThat(transformation.getParallelism()).isEqualTo(720);
+        } finally {
+            PscTableCommonUtils.resetProvider();
+        }
+    }
+
+    @Test
+    public void testSourceParallelismNotBoundedWhenRescaleDisabled_ScanParallelism360() {
+        // Scenario: partition count = 360, scan.parallelism = 360, rescale DISABLED, job parallelism = 720
+        // Expected: source parallelism = 360 (scan.parallelism), no rescale
+        
+        try {
+            // Mock partition count = 360
+            PscTableCommonUtils.setProviderForTest((topicUris, props) -> 360);
+            
+            // Create source with scan.parallelism = 360, rescale DISABLED
+            final Map<String, String> modifiedOptions =
+                    getModifiedOptions(
+                            getBasicSourceOptions(),
+                            options -> {
+                                addRescaleConfig(options, false);
+                                addScanParallelismConfig(options, 360);
+                            });
+            
+            final DynamicTableSource actualSource = createTableSource(SCHEMA, modifiedOptions);
+            assertThat(actualSource).isInstanceOf(PscDynamicSource.class);
+            
+            final PscDynamicSource pscSource = (PscDynamicSource) actualSource;
+            
+            // Verify configuration
+            assertThat(pscSource.scanParallelism).isEqualTo(360);
+            assertThat(pscSource.enableRescale).isFalse();
+            
+            // Get transformation with job parallelism = 720
+            final Transformation<RowData> transformation = produceTransformationFromSource(pscSource, 720);
+            
+            // No rescale should be applied
+            assertThat(transformation).isNotNull();
+            assertThat(transformation).isInstanceOf(SourceTransformation.class);
+            assertThat(transformation).isNotInstanceOf(PartitionTransformation.class);
+            
+            // Source parallelism should be scan.parallelism (360)
+            assertThat(transformation.getParallelism()).isEqualTo(360);
+        } finally {
+            PscTableCommonUtils.resetProvider();
+        }
+    }
+
+    @Test
+    public void testSourceParallelismNotBoundedWhenRescaleDisabled_ScanParallelism720() {
+        // Scenario: partition count = 360, scan.parallelism = 720, rescale DISABLED, job parallelism = 720
+        // Expected: source parallelism = 720 (scan.parallelism, NOT bounded by partition count)
+        // No rescale operator applied
+        
+        try {
+            // Mock partition count = 360
+            PscTableCommonUtils.setProviderForTest((topicUris, props) -> 360);
+            
+            // Create source with scan.parallelism = 720, rescale DISABLED
+            final Map<String, String> modifiedOptions =
+                    getModifiedOptions(
+                            getBasicSourceOptions(),
+                            options -> {
+                                addRescaleConfig(options, false);
+                                addScanParallelismConfig(options, 720);
+                            });
+            
+            final DynamicTableSource actualSource = createTableSource(SCHEMA, modifiedOptions);
+            assertThat(actualSource).isInstanceOf(PscDynamicSource.class);
+            
+            final PscDynamicSource pscSource = (PscDynamicSource) actualSource;
+            
+            // Verify configuration
+            assertThat(pscSource.scanParallelism).isEqualTo(720);
+            assertThat(pscSource.enableRescale).isFalse();
+            
+            // Get transformation with job parallelism = 720
+            final Transformation<RowData> transformation = produceTransformationFromSource(pscSource, 720);
+            
+            // No rescale should be applied
+            assertThat(transformation).isNotNull();
+            assertThat(transformation).isInstanceOf(SourceTransformation.class);
+            assertThat(transformation).isNotInstanceOf(PartitionTransformation.class);
+            
+            // Source parallelism should be scan.parallelism (720), NOT bounded by partition count (360)
+            assertThat(transformation.getParallelism()).isEqualTo(720);
+        } finally {
+            PscTableCommonUtils.resetProvider();
+        }
+    }
+
+    @Test
+    public void testSourceParallelismNotBoundedWhenRescaleDisabled_ScanParallelism1024() {
+        // Scenario: partition count = 360, scan.parallelism = 1024, rescale DISABLED, job parallelism = 720
+        // Expected: source parallelism = 1024 (scan.parallelism, NOT bounded by partition count)
+        // No rescale operator applied
+        
+        try {
+            // Mock partition count = 360
+            PscTableCommonUtils.setProviderForTest((topicUris, props) -> 360);
+            
+            // Create source with scan.parallelism = 1024, rescale DISABLED
+            final Map<String, String> modifiedOptions =
+                    getModifiedOptions(
+                            getBasicSourceOptions(),
+                            options -> {
+                                addRescaleConfig(options, false);
+                                addScanParallelismConfig(options, 1024);
+                            });
+            
+            final DynamicTableSource actualSource = createTableSource(SCHEMA, modifiedOptions);
+            assertThat(actualSource).isInstanceOf(PscDynamicSource.class);
+            
+            final PscDynamicSource pscSource = (PscDynamicSource) actualSource;
+            
+            // Verify configuration
+            assertThat(pscSource.scanParallelism).isEqualTo(1024);
+            assertThat(pscSource.enableRescale).isFalse();
+            
+            // Get transformation with job parallelism = 720
+            final Transformation<RowData> transformation = produceTransformationFromSource(pscSource, 720);
+            
+            // No rescale should be applied
+            assertThat(transformation).isNotNull();
+            assertThat(transformation).isInstanceOf(SourceTransformation.class);
+            assertThat(transformation).isNotInstanceOf(PartitionTransformation.class);
+            
+            // Source parallelism should be scan.parallelism (1024), NOT bounded by partition count (360)
+            assertThat(transformation.getParallelism()).isEqualTo(1024);
+        } finally {
+            PscTableCommonUtils.resetProvider();
+        }
+    }
+
+    @Test
     public void testTableSinkAutoCompleteSchemaRegistrySubject() {
         // only format
         verifyEncoderSubject(

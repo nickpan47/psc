@@ -172,12 +172,13 @@ public class PscTableCommonUtils {
      * 
      * <p>This method is used as the default implementation for {@link PartitionCountProvider}.
      * In tests, a mock provider can be injected via {@link #setProviderForTest(PartitionCountProvider)}.
+     * It can also be called at runtime by {@code PscDynamicSource} to determine source parallelism.
      *
      * @param topicUris List of topic URIs to query
      * @param pscProperties PSC properties for metadata client connection
      * @return Minimum partition count across all topics, or -1 if count cannot be determined
      */
-    private static int getTopicPartitionCount(List<String> topicUris, Properties pscProperties) {
+    public static int getTopicPartitionCount(List<String> topicUris, Properties pscProperties) {
         if (topicUris == null || topicUris.isEmpty()) {
             LOG.warn("No topic URIs provided for partition count query.");
             return -1;
